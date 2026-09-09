@@ -1,0 +1,413 @@
+// Prisma schema — base do banco de dados da APAN
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  // O resto do backend é CommonJS (package.json "type": "commonjs") — sem
+  // isso o gerador produz um client ESM (usa import.meta.url), que quebra
+  // com "Cannot use 'import.meta' outside a module" assim que roda como
+  // JS compilado (node dist/server.js). No modo dev com tsx isso passava
+  // despercebido porque o tsx contorna esse tipo de interop.
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum TipoUsuario {
+  TECNICO
+  ATLETA
+}
+
+// Categoria por idade (tabela da CBDA usada pela APAN). A idade que conta é
+// a que o atleta completa NO ANO (ano de referência − ano de nascimento),
+// não a idade exata na data de hoje — por isso a categoria muda quando o
+// ano vira, não no aniversário. Ver backend/src/lib/categoria.ts.
+enum Categoria {
+  PRE_MIRIM
+  MIRIM_1
+  MIRIM_2
+  PETIZ_1
+  PETIZ_2
+  INFANTIL_1
+  INFANTIL_2
+  JUVENIL_1
+  JUVENIL_2
+  JUNIOR_1
+  JUNIOR_2
+  SENIOR
+}
+
+enum FaseCiclo {
+  BASE
+  FORCA
+  POTENCIA
+  POLIMENTO
+}
+
+enum BlocoTreino {
+  AQUECIMENTO
+  SERIE_PREPARATORIA
+  SERIE_PRINCIPAL
+  SOLTURA
+}
+
+enum QualidadeSono {
+  RUIM
+  REGULAR
+  BOM
+  OTIMO
+}
+
+enum OrigemPresenca {
+  AUTOMATICA
+  MANUAL
+  // Atleta marcou "Não compareci" no próprio treino — ver POST
+  // /atleta/nao-compareci.
+  ATLETA
+  // Ninguém registrou nada (nem tempo, nem PSE) em até 48h da criação do
+  // treino — o sistema conta como falta sozinho, sem precisar de técnico ou
+  // atleta agir. Ver lib/ausencia.ts.
+  EXPIRADA
+}
+
+enum EstiloNado {
+  LIVRE
+  COSTAS
+  PEITO
+  BORBOLETA
+  MEDLEY
+}
+
+enum Sexo {
+  MASCULINO
+  FEMININO
+}
+
+// Piscina de 25m (curta) ou 50m (longa) — tempos não são comparáveis entre
+// os dois tamanhos, então um recorde é sempre específico de uma piscina.
+enum TamanhoPiscina {
+  M25
+  M50
+}
+
+enum StatusEducativo {
+  PENDENTE
+  PUBLICADO
+  REJEITADO
+}
+
+enum Medalha {
+  OURO
+  PRATA
+  BRONZE
+}
+
+// Como o resultado foi lançado no sistema. Hoje só existe MANUAL (o próprio
+// atleta digita); o campo já existe para no futuro receber resultados de
+// uma importação automática (API da CBDA/FEDAP) sem precisar de migração —
+// nesse dia, os resultados importados entram com origem API.
+enum OrigemResultado {
+  MANUAL
+  API
+}
+
+model Usuario {
+  id           String      @id @default(uuid())
+  nome         String
+  email        String      @unique
+  senha        String
+  tipo         TipoUsuario
+  criadoEm     DateTime    @default(now())
+  atualizadoEm DateTime    @updatedAt
+
+  atleta     Atleta?
+  tecnico    Tecnico?
+  educativos Educativo[]
+
+  @@map("usuarios")
+}
+
+model Atleta {
+  id             String    @id @default(uuid())
+  usuarioId      String    @unique
+  usuario        Usuario   @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  categoria      Categoria
+  dataNascimento DateTime
+  // Opcional só pra não quebrar contas já cadastradas antes desse campo
+  // existir — cadastro e edição de perfil sempre exigem um valor daqui pra
+  // frente (ver routes/auth.routes.ts).
+  sexo           Sexo?
+  criadoEm       DateTime  @default(now())
+  atualizadoEm   DateTime  @updatedAt
+
+  registrosTempo       RegistroTempo[]
+  registrosPSE         RegistroPSE[]
+  presencas            Presenca[]
+  resultadosCompeticao ResultadoCompeticao[]
+  melhoresMarcas       MelhorMarca[]
+  provasPrincipais     ProvaPrincipal[]
+
+  @@map("atletas")
+}
+
+model Tecnico {
+  id           String   @id @default(uuid())
+  usuarioId    String   @unique
+  usuario      Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  // Acesso especial de administrador: enxerga tudo (igual qualquer técnico
+  // já enxerga) e também pode editar/excluir treino criado por outro
+  // técnico — algo que um técnico comum não pode (ver obterTreinoParaEditar
+  // em routes/treinos.routes.ts). Nunca é setável pelo próprio usuário; só
+  // é ligado manualmente direto no banco, sem caminho nenhum pela UI/API.
+  admin        Boolean  @default(false)
+  criadoEm     DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  treinos Treino[]
+
+  @@map("tecnicos")
+}
+
+// Sessão de treino padronizada montada pelo técnico. O corpo é dividido em
+// quatro blocos; cada bloco é uma lista de séries em texto livre (o técnico
+// pode adicionar quantas quiser dentro de um mesmo bloco) e pode ser marcado
+// como "anotar tempo", o que libera o atleta a registrar os tempos feitos
+// naquele bloco.
+model Treino {
+  id             String      @id @default(uuid())
+  data           DateTime
+  categorias     Categoria[]
+  objetivoSemana String
+  faseCiclo      FaseCiclo
+  pseEsperada    Int?
+
+  aquecimento                   String[] @default([])
+  aquecimentoCronometrado       Boolean  @default(false)
+  seriePreparatoria             String[] @default([])
+  seriePreparatoriaCronometrada Boolean  @default(false)
+  seriePrincipal                String[] @default([])
+  seriePrincipalCronometrada    Boolean  @default(false)
+  soltura                       String[] @default([])
+  solturaCronometrada           Boolean  @default(false)
+
+  // Enquanto falso, o treino aparece pro atleta na lista normalmente (mesma
+  // data/categoria/objetivo de sempre) mas o conteúdo (séries, PSE, tempos)
+  // fica bloqueado até o técnico liberar — ver GET /atleta/meu-treino,
+  // /atleta/treinos/:id e /atleta/meu-historico. @default(true) é
+  // proposital: treinos já existentes (e quem não usa essa opção) continuam
+  // visíveis exatamente como sempre foram.
+  liberado Boolean @default(true)
+
+  tecnicoId String
+  tecnico   Tecnico @relation(fields: [tecnicoId], references: [id], onDelete: Cascade)
+
+  criadoEm     DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  registrosTempo RegistroTempo[]
+  registrosPSE   RegistroPSE[]
+  presencas      Presenca[]
+
+  @@index([data])
+  @@map("treinos")
+}
+
+// Um "tiro" (repetição cronometrada) registrado pelo atleta para um bloco
+// específico do treino — só pode ser lançado se aquele bloco estiver
+// marcado como "tempo cronometrado" no Treino. O estilo é opcional (o
+// atleta pode não identificar o nado do tiro); sem ele não dá pra comparar
+// o tiro com os recordes internos.
+//
+// `distancia` é texto livre por escolha deliberada (era número antes) — o
+// atleta pode escrever qualquer coisa ali (ex: "4x50", uma observação), não
+// só a distância em metros. Isso significa que intensidade, comparação com
+// recorde interno e zona de treinamento (que dependem de saber a distância
+// exata) só funcionam pros tiros onde o texto bate exatamente com um
+// número — ver lib/intensidade.ts.
+model RegistroTempo {
+  id              String      @id @default(uuid())
+  atletaId        String
+  atleta          Atleta      @relation(fields: [atletaId], references: [id], onDelete: Cascade)
+  treinoId        String
+  treino          Treino      @relation(fields: [treinoId], references: [id], onDelete: Cascade)
+  bloco           BlocoTreino
+  distancia       String
+  tempoCentesimos Int
+  estilo          EstiloNado?
+  ordem           Int         @default(0)
+  criadoEm        DateTime    @default(now())
+
+  @@index([atletaId, treinoId])
+  @@map("registros_tempo")
+}
+
+// Registro pós-treino do atleta: PSE (0-10) e, opcionalmente, qualidade do
+// sono da noite anterior. Um por atleta/treino — reenviar substitui o
+// registro anterior.
+model RegistroPSE {
+  id            String         @id @default(uuid())
+  atletaId      String
+  atleta        Atleta         @relation(fields: [atletaId], references: [id], onDelete: Cascade)
+  treinoId      String
+  treino        Treino         @relation(fields: [treinoId], references: [id], onDelete: Cascade)
+  pse           Int
+  qualidadeSono QualidadeSono?
+  criadoEm      DateTime       @default(now())
+  atualizadoEm  DateTime       @updatedAt
+
+  @@unique([atletaId, treinoId])
+  @@map("registros_pse")
+}
+
+// Presença do atleta em um treino. Marcada automaticamente quando o atleta
+// registra a PSE daquele treino (origem AUTOMATICA), ou manualmente pelo
+// técnico (origem MANUAL) — usado como fallback para atletas que não usam
+// o app com frequência. Um registro por atleta/treino; a ausência de
+// registro é tratada como falta ao calcular a frequência.
+model Presenca {
+  id           String         @id @default(uuid())
+  atletaId     String
+  atleta       Atleta         @relation(fields: [atletaId], references: [id], onDelete: Cascade)
+  treinoId     String
+  treino       Treino         @relation(fields: [treinoId], references: [id], onDelete: Cascade)
+  presente     Boolean        @default(true)
+  origem       OrigemPresenca
+  criadoEm     DateTime       @default(now())
+  atualizadoEm DateTime       @updatedAt
+
+  @@unique([atletaId, treinoId])
+  @@map("presencas")
+}
+
+// Levantamento histórico de recordes internos da equipe (desde a fundação),
+// cadastrado manualmente pelo técnico ou importado em lote via CSV. O nome
+// do atleta é texto livre — recordes antigos nem sempre correspondem a um
+// Usuario cadastrado no sistema. O "recorde atual" de uma prova (estilo +
+// distância) numa categoria, sexo e tamanho de piscina é sempre o de menor
+// tempoCentesimos entre as linhas daquele grupo — não guardamos um flag
+// "atual" separado. Sexo e piscina são obrigatórios porque tempos de
+// piscinas diferentes (25m x 50m) ou sexos diferentes não são comparáveis.
+model RecordeInterno {
+  id              String         @id @default(uuid())
+  estilo          EstiloNado
+  distancia       Int
+  categoria       Categoria
+  sexo            Sexo
+  piscina         TamanhoPiscina
+  tempoCentesimos Int
+  nomeAtleta      String
+  data            DateTime
+  criadoEm        DateTime       @default(now())
+  atualizadoEm    DateTime       @updatedAt
+
+  @@index([estilo, distancia, categoria, sexo, piscina])
+  @@map("recordes_internos")
+}
+
+// Biblioteca de educativos de natação, organizada por estilo. Técnico
+// cadastra já como PUBLICADO; atleta pode sugerir (entra como PENDENTE) e o
+// técnico aprova (vira PUBLICADO) ou rejeita (fica REJEITADO, mantido para
+// o autor ver o retorno em vez de simplesmente desaparecer).
+model Educativo {
+  id                String          @id @default(uuid())
+  estilo            EstiloNado
+  nome              String
+  descricaoObjetivo String
+  videoUrl          String
+  status            StatusEducativo @default(PENDENTE)
+  autorId           String
+  autor             Usuario         @relation(fields: [autorId], references: [id], onDelete: Cascade)
+  criadoEm          DateTime        @default(now())
+  atualizadoEm      DateTime        @updatedAt
+
+  @@index([estilo, status])
+  @@map("educativos")
+}
+
+// Evento de competição (não é específico de um atleta — vários atletas do
+// time podem ter resultados na mesma competição). `externoId` fica pronto
+// pra, no futuro, casar com o identificador de uma API externa (CBDA/FEDAP)
+// e evitar duplicar a competição numa importação automática; hoje é sempre
+// null (cadastro manual não tem esse identificador).
+model Competicao {
+  id           String   @id @default(uuid())
+  nome         String
+  data         DateTime
+  local        String
+  externoId    String?  @unique
+  criadoEm     DateTime @default(now())
+  atualizadoEm DateTime @updatedAt
+
+  resultados ResultadoCompeticao[]
+
+  @@index([data])
+  @@map("competicoes")
+}
+
+// Resultado de um atleta numa prova de uma competição. Cadastro manual pelo
+// próprio atleta por enquanto (origem MANUAL); `externoId` e `origem` já
+// preparam o modelo pra uma futura importação automática via API (upsert
+// idempotente por externoId, sem duplicar resultados já existentes).
+model ResultadoCompeticao {
+  id              String          @id @default(uuid())
+  atletaId        String
+  atleta          Atleta          @relation(fields: [atletaId], references: [id], onDelete: Cascade)
+  competicaoId    String
+  competicao      Competicao      @relation(fields: [competicaoId], references: [id], onDelete: Cascade)
+  estilo          EstiloNado
+  distancia       Int
+  tempoCentesimos Int
+  colocacao       Int?
+  medalha         Medalha?
+  origem          OrigemResultado @default(MANUAL)
+  externoId       String?         @unique
+  criadoEm        DateTime        @default(now())
+  atualizadoEm    DateTime        @updatedAt
+
+  @@index([atletaId, estilo, distancia])
+  @@map("resultados_competicao")
+}
+
+// Melhor marca pessoal do atleta numa prova (estilo + distância + tamanho
+// de piscina) — cadastrada diretamente pelo próprio atleta, sem precisar
+// estar associada a um resultado de competição. Serve como referência
+// pessoal de "meu melhor tempo hoje"; uma linha por prova/piscina, editada
+// no lugar quando o atleta bate a marca de novo (por isso o unique).
+// `data` é opcional porque às vezes o atleta só quer registrar a marca sem
+// saber/lembrar exatamente quando ela foi feita.
+model MelhorMarca {
+  id              String         @id @default(uuid())
+  atletaId        String
+  atleta          Atleta         @relation(fields: [atletaId], references: [id], onDelete: Cascade)
+  estilo          EstiloNado
+  distancia       Int
+  piscina         TamanhoPiscina
+  tempoCentesimos Int
+  data            DateTime?
+  criadoEm        DateTime       @default(now())
+  atualizadoEm    DateTime       @updatedAt
+
+  @@unique([atletaId, estilo, distancia, piscina])
+  @@map("melhores_marcas")
+}
+
+// Até 4 provas que o atleta escolhe pra destacar no próprio perfil (ex:
+// "meus pontos fortes são 100m Peito e 50m Livre"). É uma seleção curada,
+// sem tempo nem piscina associados — diferente de MelhorMarca. Substituída
+// por completo a cada salvamento (apaga tudo e recria com a nova ordem),
+// não editada linha a linha.
+model ProvaPrincipal {
+  id        String     @id @default(uuid())
+  atletaId  String
+  atleta    Atleta     @relation(fields: [atletaId], references: [id], onDelete: Cascade)
+  estilo    EstiloNado
+  distancia Int
+  ordem     Int        @default(0)
+  criadoEm  DateTime   @default(now())
+
+  @@unique([atletaId, ordem])
+  @@map("provas_principais")
+}

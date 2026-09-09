@@ -1,0 +1,8 @@
+# Editors / OS
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Each app manages its own node_modules, build output and .env —
+# see mobile/.gitignore and backend/.gitignore.

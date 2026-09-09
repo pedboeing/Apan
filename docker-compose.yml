@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: apan-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: apan
+      POSTGRES_PASSWORD: apan
+      POSTGRES_DB: apan_dev
+    ports:
+      - '5432:5432'
+    volumes:
+      - apan_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  apan_postgres_data:
