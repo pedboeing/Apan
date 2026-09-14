@@ -68,7 +68,11 @@ const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3333';
 // tentar de novo. Com o timeout, no pior caso o usuário vê um erro claro
 // (com botão de tentar de novo, que toda tela já tem) depois de alguns
 // segundos, em vez de uma tela travada.
-const TIMEOUT_MS = 20_000;
+// Tem que ser maior que o maior limite do backend (25s no adapter do
+// Prisma — ver backend/src/prisma.ts), senão o app desiste antes de o
+// servidor conseguir responder e troca uma resposta boa por "não foi
+// possível conectar".
+const TIMEOUT_MS = 30_000;
 
 type AuthResponse = {
   token: string;

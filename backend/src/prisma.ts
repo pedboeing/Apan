@@ -10,9 +10,16 @@ import { PrismaClient } from './generated/prisma/client';
 const adapter = new PrismaPg(
   {
     connectionString: process.env.DATABASE_URL,
-    connectionTimeoutMillis: 10_000, // tempo máx. pra abrir uma conexão nova
-    statement_timeout: 15_000, // tempo máx. pra uma query individual rodar
-    query_timeout: 15_000, // mesma ideia, aplicada do lado do driver `pg`
+    // Os limites precisam caber o despertar do banco suspenso, medido em
+    // ~16s em produção — com os 15s antigos a primeira requisição depois de
+    // um período ocioso falhava por pouco. O manter-banco-ativo.ts torna
+    // isso raro; esta folga é a rede de segurança pra quando acontecer
+    // mesmo assim (logo depois de um deploy, por exemplo). Tem que ficar
+    // abaixo do TIMEOUT_MS do app (mobile/src/lib/api.ts), senão o cliente
+    // desiste antes e o usuário vê erro de conexão em vez da resposta.
+    connectionTimeoutMillis: 20_000, // tempo máx. pra abrir uma conexão nova
+    statement_timeout: 25_000, // tempo máx. pra uma query individual rodar
+    query_timeout: 25_000, // mesma ideia, aplicada do lado do driver `pg`
     idleTimeoutMillis: 30_000, // fecha conexões ociosas, evita acumular conexão morta no pool
     max: 10, // limite de conexões simultâneas por instância do servidor
   },
