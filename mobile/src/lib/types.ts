@@ -370,11 +370,15 @@ export type RegistroPSE = {
 // das 48h sem resposta, ou o atleta marcou "Não compareci" — ver
 // backend/src/lib/ausencia.ts, que é quem decide isso de verdade; o app só
 // exibe o que já vem calculado.
-export type StatusAtleta = 'PENDENTE' | 'RESPONDIDO' | 'AUSENTE';
+// PRESENTE = o técnico fez a chamada e confirmou que o atleta veio, mas
+// ele ainda não lançou tempo nem PSE. É diferente de RESPONDIDO (veio e
+// anotou) e continua contando como pendência de registro pro atleta.
+export type StatusAtleta = 'PENDENTE' | 'RESPONDIDO' | 'PRESENTE' | 'AUSENTE';
 
 export const STATUS_ATLETA_LABEL: Record<StatusAtleta, string> = {
   PENDENTE: 'Pendente',
   RESPONDIDO: 'Respondido',
+  PRESENTE: 'Presente',
   AUSENTE: 'Ausente',
 };
 
@@ -385,7 +389,10 @@ export type TreinoComRegistros = Treino & {
 };
 
 export function treinoPrecisaResponder(treino: TreinoComRegistros): boolean {
-  return treino.statusAtleta === 'PENDENTE';
+  // PRESENTE entra aqui de propósito: o técnico ter confirmado a presença
+  // não substitui o registro do atleta — se saísse da lista, a chamada do
+  // técnico silenciaria a pendência dele sem ninguém perceber.
+  return treino.statusAtleta === 'PENDENTE' || treino.statusAtleta === 'PRESENTE';
 }
 
 export type TiroInput = { distancia: string; tempoCentesimos: number; estilo?: Estilo | null };

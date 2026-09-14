@@ -1,13 +1,42 @@
+import { useFocusEffect } from '@react-navigation/native';
 import { useLocalSearchParams } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { EstadoErro } from '@/components/estado-erro';
 import { useAuth } from '@/context/auth-context';
 import { useTheme } from '@/context/theme-context';
+import { alertar, confirmar } from '@/lib/alerta';
 import { api, ApiError } from '@/lib/api';
 import { formatarTempo } from '@/lib/tempo';
 import type { Cores } from '@/lib/theme';
-import { BLOCOS, ESTILO_LABEL, STATUS_ATLETA_LABEL, type AtletaRegistro, type RegistrosTreinoResponse } from '@/lib/types';
+import {
+  BLOCOS,
+  ESTILO_LABEL,
+  STATUS_ATLETA_LABEL,
+  type AtletaRegistro,
+  type RegistrosTreinoResponse,
+  type StatusAtleta,
+} from '@/lib/types';
+
+// Pra chamada tanto faz quem registrou a presença: o atleta que anotou o
+// treino sozinho e o que o técnico marcou aqui contam igual como presentes.
+function estaPresente(status: StatusAtleta): boolean {
+  return status === 'RESPONDIDO' || status === 'PRESENTE';
+}
+
+function temDados(atleta: AtletaRegistro): boolean {
+  return atleta.tempos.length > 0 || atleta.pse !== null;
+}
+
+// Espelha o calcularStatusAtleta do backend (lib/ausencia.ts) pra lista
+// reagir já no toque, sem esperar a rede: numa chamada o técnico marca
+// vários atletas seguidos, e travar a cada toque atrapalha o fluxo. Se a
+// requisição falhar, marcar() devolve o status anterior.
+function statusApos(atleta: AtletaRegistro, presente: boolean): StatusAtleta {
+  if (!presente) return 'AUSENTE';
+  return temDados(atleta) ? 'RESPONDIDO' : 'PRESENTE';
+}
 
 export default function RegistrosTreinoScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -16,28 +45,78 @@ export default function RegistrosTreinoScreen() {
   const styles = criarEstilos(colors);
   const [dados, setDados] = useState<RegistrosTreinoResponse | null>(null);
   const [erro, setErro] = useState<string | null>(null);
+  const [salvandoLote, setSalvandoLote] = useState(false);
 
-  useEffect(() => {
-    let ativo = true;
-    api
-      .registrosDoTreino(token!, id)
-      .then((res) => {
-        if (ativo) setDados(res);
-      })
-      .catch((error: unknown) => {
-        if (ativo) setErro(error instanceof ApiError ? error.message : 'Não foi possível carregar os registros.');
-      });
-    return () => {
-      ativo = false;
-    };
+  const carregar = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await api.registrosDoTreino(token, id);
+      setDados(res);
+      setErro(null);
+    } catch (error) {
+      setErro(error instanceof ApiError ? error.message : 'Não foi possível carregar os registros.');
+    }
   }, [id, token]);
 
-  if (erro) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.erro}>{erro}</Text>
-      </View>
+  useFocusEffect(
+    useCallback(() => {
+      carregar();
+    }, [carregar]),
+  );
+
+  function aplicarStatusLocal(atletaId: string, status: StatusAtleta) {
+    setDados((atual) =>
+      atual
+        ? { ...atual, atletas: atual.atletas.map((a) => (a.atletaId === atletaId ? { ...a, status } : a)) }
+        : atual,
     );
+  }
+
+  async function marcar(atleta: AtletaRegistro, presente: boolean) {
+    if (!token) return;
+    const anterior = atleta.status;
+    aplicarStatusLocal(atleta.atletaId, statusApos(atleta, presente));
+    try {
+      await api.marcarPresenca(token, { atletaId: atleta.atletaId, treinoId: id, presente });
+    } catch (error) {
+      aplicarStatusLocal(atleta.atletaId, anterior);
+      alertar('Não foi possível salvar', error instanceof ApiError ? error.message : 'Tente de novo.');
+    }
+  }
+
+  function marcarTodosPresentes() {
+    if (!token || !dados || salvandoLote) return;
+
+    // Quem já lançou tempo/PSE fica de fora: esse atleta já conta como
+    // presente por conta própria, e sobrescrever apagaria essa informação.
+    const alvos = dados.atletas.filter((a) => !temDados(a));
+    if (alvos.length === 0) {
+      alertar('Nada a marcar', 'Todos os atletas do grupo já registraram este treino por conta própria.');
+      return;
+    }
+
+    const plural = alvos.length > 1;
+    confirmar(
+      'Marcar todos presentes',
+      `${alvos.length} atleta${plural ? 's serão marcados' : ' será marcado'} como presente. Quem já lançou tempo ou PSE não é alterado.`,
+      'Marcar todos',
+      async () => {
+        setSalvandoLote(true);
+        try {
+          await api.marcarPresencaEmLote(token, { treinoId: id, presente: true });
+          await carregar();
+        } catch (error) {
+          alertar('Não foi possível salvar', error instanceof ApiError ? error.message : 'Tente de novo.');
+        } finally {
+          setSalvandoLote(false);
+        }
+      },
+      false,
+    );
+  }
+
+  if (erro && !dados) {
+    return <EstadoErro mensagem={erro} aoTentarNovamente={carregar} />;
   }
 
   if (!dados) {
@@ -48,8 +127,9 @@ export default function RegistrosTreinoScreen() {
     );
   }
 
-  const respondidos = dados.atletas.filter((a) => a.status === 'RESPONDIDO').length;
+  const presentes = dados.atletas.filter((a) => estaPresente(a.status)).length;
   const ausentes = dados.atletas.filter((a) => a.status === 'AUSENTE').length;
+  const semChamada = dados.atletas.filter((a) => a.status === 'PENDENTE').length;
 
   return (
     <FlatList
@@ -57,48 +137,98 @@ export default function RegistrosTreinoScreen() {
       keyExtractor={(item) => item.atletaId}
       contentContainerStyle={styles.lista}
       ListHeaderComponent={
-        <Text style={styles.resumo}>
-          {respondidos} de {dados.atletas.length} atletas já responderam
-          {ausentes > 0 ? ` · ${ausentes} ausente${ausentes > 1 ? 's' : ''}` : ''}
-        </Text>
+        dados.atletas.length > 0 ? (
+          <View style={styles.cabecalho}>
+            <Text style={styles.resumo}>
+              {presentes} de {dados.atletas.length} presente{presentes === 1 ? '' : 's'}
+              {ausentes > 0 ? ` · ${ausentes} ausente${ausentes > 1 ? 's' : ''}` : ''}
+              {semChamada > 0 ? ` · ${semChamada} sem chamada` : ''}
+            </Text>
+            <Pressable
+              style={[styles.botaoTodos, salvandoLote ? styles.botaoTodosDesabilitado : null]}
+              onPress={marcarTodosPresentes}
+              disabled={salvandoLote}
+              accessibilityRole="button"
+            >
+              <Text style={styles.botaoTodosTexto}>{salvandoLote ? 'Marcando...' : 'Marcar todos presentes'}</Text>
+            </Pressable>
+          </View>
+        ) : null
       }
       ListEmptyComponent={
         <View style={styles.center}>
           <Text style={styles.vazioTexto}>Nenhum atleta cadastrado nesse grupo ainda.</Text>
         </View>
       }
-      renderItem={({ item }) => <AtletaRegistroCard atleta={item} />}
+      renderItem={({ item }) => <AtletaRegistroCard atleta={item} aoMarcar={marcar} />}
     />
   );
 }
 
-function AtletaRegistroCard({ atleta }: { atleta: AtletaRegistro }) {
+function AtletaRegistroCard({
+  atleta,
+  aoMarcar,
+}: {
+  atleta: AtletaRegistro;
+  aoMarcar: (atleta: AtletaRegistro, presente: boolean) => void;
+}) {
   const { colors } = useTheme();
   const styles = criarEstilos(colors);
   const [expandido, setExpandido] = useState(false);
   const blocosComTempo = BLOCOS.filter((b) => atleta.tempos.some((t) => t.bloco === b.key));
-  const respondeu = atleta.status === 'RESPONDIDO';
 
-  // Só quem já respondeu tem algo pra mostrar — pendente ou ausente, a caixa
-  // fica só com nome + selo, sem abrir (não tem tiro nem PSE nenhum dos
-  // dois casos).
-  function handlePress() {
-    if (!respondeu) return;
-    setExpandido((atual) => !atual);
-  }
+  const registrou = temDados(atleta);
+  const presente = estaPresente(atleta.status);
+  const ausente = atleta.status === 'AUSENTE';
+  // Só acontece quando o técnico marca ausência por cima de um treino que o
+  // atleta já registrou. É permitido — a chamada dele é a autoridade — mas
+  // vale avisar na tela, porque pode ter sido toque errado.
+  const conflito = ausente && registrou;
 
   const badgeEstilo =
-    atleta.status === 'RESPONDIDO' ? styles.badgeRespondeu : atleta.status === 'AUSENTE' ? styles.badgeAusente : styles.badgePendente;
+    atleta.status === 'RESPONDIDO'
+      ? styles.badgeRespondeu
+      : atleta.status === 'PRESENTE'
+        ? styles.badgePresente
+        : ausente
+          ? styles.badgeAusente
+          : styles.badgePendente;
 
   return (
-    <Pressable style={styles.card} onPress={handlePress} disabled={!respondeu} accessibilityRole={respondeu ? 'button' : undefined}>
-      <View style={styles.cardHeader}>
+    <View style={styles.card}>
+      <Pressable
+        style={styles.cardHeader}
+        onPress={() => registrou && setExpandido((atual) => !atual)}
+        disabled={!registrou}
+        accessibilityRole={registrou ? 'button' : undefined}
+      >
         <Text style={styles.cardNome}>{atleta.nome}</Text>
         <View style={styles.cardHeaderDireita}>
           <Text style={badgeEstilo}>{STATUS_ATLETA_LABEL[atleta.status].toLowerCase()}</Text>
-          {respondeu ? <Text style={styles.seta}>{expandido ? '▾' : '▸'}</Text> : null}
+          {registrou ? <Text style={styles.seta}>{expandido ? '▾' : '▸'}</Text> : null}
         </View>
+      </Pressable>
+
+      <View style={styles.chamada}>
+        <Pressable
+          style={[styles.botaoChamada, presente ? styles.chamadaPresenteAtiva : null]}
+          onPress={() => aoMarcar(atleta, true)}
+          accessibilityRole="button"
+          accessibilityState={{ selected: presente }}
+        >
+          <Text style={[styles.botaoChamadaTexto, presente ? styles.chamadaTextoPresenteAtiva : null]}>Presente</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.botaoChamada, ausente ? styles.chamadaAusenteAtiva : null]}
+          onPress={() => aoMarcar(atleta, false)}
+          accessibilityRole="button"
+          accessibilityState={{ selected: ausente }}
+        >
+          <Text style={[styles.botaoChamadaTexto, ausente ? styles.chamadaTextoAusenteAtiva : null]}>Ausente</Text>
+        </Pressable>
       </View>
+
+      {conflito ? <Text style={styles.aviso}>Marcado como ausente, mas tem registro lançado por ele.</Text> : null}
 
       {expandido ? (
         <View style={styles.detalhe}>
@@ -122,7 +252,7 @@ function AtletaRegistroCard({ atleta }: { atleta: AtletaRegistro }) {
           })}
         </View>
       ) : null}
-    </Pressable>
+    </View>
   );
 }
 
@@ -134,11 +264,6 @@ function criarEstilos(c: Cores) {
       justifyContent: 'center',
       padding: 24,
     },
-    erro: {
-      color: c.danger,
-      fontSize: 14,
-      textAlign: 'center',
-    },
     vazioTexto: {
       fontSize: 14,
       color: c.textMuted,
@@ -149,18 +274,37 @@ function criarEstilos(c: Cores) {
       gap: 12,
       flexGrow: 1,
     },
+    cabecalho: {
+      gap: 10,
+      marginBottom: 8,
+    },
     resumo: {
       fontSize: 14,
       fontWeight: '600',
       color: c.textMuted,
-      marginBottom: 8,
+    },
+    botaoTodos: {
+      borderWidth: 1,
+      borderColor: c.primary,
+      backgroundColor: c.primarySoft,
+      borderRadius: 10,
+      paddingVertical: 10,
+      alignItems: 'center',
+    },
+    botaoTodosDesabilitado: {
+      opacity: 0.6,
+    },
+    botaoTodosTexto: {
+      fontSize: 14,
+      fontWeight: '700',
+      color: c.primary,
     },
     card: {
       borderWidth: 1,
       borderColor: c.border,
       borderRadius: 12,
       padding: 14,
-      gap: 6,
+      gap: 10,
       backgroundColor: c.surface,
       marginBottom: 12,
     },
@@ -168,6 +312,7 @@ function criarEstilos(c: Cores) {
       flexDirection: 'row',
       justifyContent: 'space-between',
       alignItems: 'center',
+      gap: 8,
     },
     cardHeaderDireita: {
       flexDirection: 'row',
@@ -179,15 +324,63 @@ function criarEstilos(c: Cores) {
       color: c.textMuted,
     },
     cardNome: {
+      flex: 1,
       fontSize: 15,
       fontWeight: '700',
       color: c.text,
+    },
+    chamada: {
+      flexDirection: 'row',
+      gap: 8,
+    },
+    botaoChamada: {
+      flex: 1,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 8,
+      paddingVertical: 9,
+      alignItems: 'center',
+      backgroundColor: c.background,
+    },
+    botaoChamadaTexto: {
+      fontSize: 13,
+      fontWeight: '600',
+      color: c.textMuted,
+    },
+    chamadaPresenteAtiva: {
+      borderColor: c.success,
+      backgroundColor: c.successSoft,
+    },
+    chamadaTextoPresenteAtiva: {
+      color: c.success,
+    },
+    chamadaAusenteAtiva: {
+      borderColor: c.danger,
+      backgroundColor: c.dangerSoft,
+    },
+    chamadaTextoAusenteAtiva: {
+      color: c.danger,
+    },
+    aviso: {
+      fontSize: 12,
+      color: c.warning,
+      lineHeight: 17,
     },
     badgeRespondeu: {
       fontSize: 11,
       fontWeight: '600',
       color: c.success,
       backgroundColor: c.successSoft,
+      paddingHorizontal: 8,
+      paddingVertical: 3,
+      borderRadius: 10,
+      overflow: 'hidden',
+    },
+    badgePresente: {
+      fontSize: 11,
+      fontWeight: '600',
+      color: c.primary,
+      backgroundColor: c.primarySoft,
       paddingHorizontal: 8,
       paddingVertical: 3,
       borderRadius: 10,

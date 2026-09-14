@@ -140,6 +140,8 @@ export const api = {
     request<FrequenciaGrupoResponse>(`/tecnico/frequencia?categoria=${categoria}&periodo=${periodo}`, { token }),
   marcarPresenca: (token: string, dados: { atletaId: string; treinoId: string; presente: boolean }) =>
     request<{ presenca: unknown }>('/tecnico/presencas', { method: 'POST', body: dados, token }),
+  marcarPresencaEmLote: (token: string, dados: { treinoId: string; presente: boolean }) =>
+    request<{ marcados: number; ignorados: number }>('/tecnico/presencas/lote', { method: 'POST', body: dados, token }),
 
   listarRecordes: (token: string, filtros?: FiltrosRecorde) =>
     request<{ recordes: RecordeInterno[] }>(`/recordes${queryDeFiltros(filtros)}`, { token }),

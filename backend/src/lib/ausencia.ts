@@ -9,17 +9,32 @@ import { prisma } from '../prisma';
 // garantirAusenciasAutomaticasPorCategoria/DoTreino abaixo.
 export const JANELA_AUSENCIA_HORAS = 48;
 
-export type StatusAtletaTreino = 'PENDENTE' | 'RESPONDIDO' | 'AUSENTE';
+export type StatusAtletaTreino = 'PENDENTE' | 'RESPONDIDO' | 'PRESENTE' | 'AUSENTE';
 
 // Única definição do que conta como "respondido" — usada tanto pro atleta
 // (meu-treino/meu-histórico) quanto pro técnico (registros do treino), pra
 // não correr o risco das duas visões divergirem sobre o mesmo treino.
+//
+// A chamada do técnico (origem MANUAL) tem a última palavra sobre quem
+// esteve na piscina: é ele quem viu o treino acontecer. Por isso ela vence
+// inclusive tempos/PSE já lançados — cobre o caso de atleta que anota
+// treino que não fez. Quando o técnico confirma a presença mas o atleta
+// ainda não anotou nada, o status é PRESENTE ("veio, mas não registrou"),
+// que é diferente de RESPONDIDO e continua cobrando o registro dele.
 export function calcularStatusAtleta(
   tempos: unknown[],
   pse: unknown | null,
-  presencas: { presente: boolean }[],
+  presencas: { presente: boolean; origem: OrigemPresenca }[],
 ): StatusAtletaTreino {
-  if (tempos.length > 0 || pse) return 'RESPONDIDO';
+  const registrou = tempos.length > 0 || Boolean(pse);
+  const chamadaDoTecnico = presencas.find((p) => p.origem === OrigemPresenca.MANUAL);
+
+  if (chamadaDoTecnico) {
+    if (!chamadaDoTecnico.presente) return 'AUSENTE';
+    return registrou ? 'RESPONDIDO' : 'PRESENTE';
+  }
+
+  if (registrou) return 'RESPONDIDO';
   if (presencas.some((p) => !p.presente)) return 'AUSENTE';
   return 'PENDENTE';
 }

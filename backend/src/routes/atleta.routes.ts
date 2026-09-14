@@ -49,7 +49,7 @@ function prepararTreinoParaAtleta<
     liberado: boolean;
     tecnico: { usuario: { nome: string } };
   },
->(treino: T, tempos: unknown[], pse: unknown | null, presencas: { presente: boolean }[]) {
+>(treino: T, tempos: unknown[], pse: unknown | null, presencas: { presente: boolean; origem: OrigemPresenca }[]) {
   const { tecnico, ...resto } = treino;
   const criadoPorNome = tecnico.usuario.nome;
   const statusAtleta = calcularStatusAtleta(tempos, pse, presencas);
@@ -91,7 +91,7 @@ function prepararListaParaAtleta<
   T extends {
     registrosTempo: unknown[];
     registrosPSE: unknown[];
-    presencas: { presente: boolean }[];
+    presencas: { presente: boolean; origem: OrigemPresenca }[];
     liberado: boolean;
     tecnico: { usuario: { nome: string } };
   },
@@ -185,7 +185,7 @@ atletaRouter.get('/meu-historico', async (req, res) => {
       OR: [
         { registrosTempo: { some: { atletaId: atleta.id } } },
         { registrosPSE: { some: { atletaId: atleta.id } } },
-        { presencas: { some: { atletaId: atleta.id, presente: false } } },
+        { presencas: { some: { atletaId: atleta.id } } },
       ],
     },
     include: incluirRegistrosDoAtleta(atleta.id),
@@ -349,12 +349,18 @@ atletaRouter.post('/nao-compareci', async (req, res) => {
     throw new AppError(403, 'Este treino ainda não foi liberado pelo técnico');
   }
 
-  const [temTempo, temPse] = await Promise.all([
+  const [temTempo, temPse, presencaExistente] = await Promise.all([
     prisma.registroTempo.findFirst({ where: { atletaId: atleta.id, treinoId } }),
     prisma.registroPSE.findUnique({ where: { atletaId_treinoId: { atletaId: atleta.id, treinoId } } }),
+    prisma.presenca.findUnique({ where: { atletaId_treinoId: { atletaId: atleta.id, treinoId } } }),
   ]);
   if (temTempo || temPse) {
     throw new AppError(409, 'Você já registrou esse treino — não é possível marcar como ausente.');
+  }
+  // Se o técnico já fez a chamada e te marcou presente, a palavra é dele —
+  // mesma precedência aplicada em calcularStatusAtleta.
+  if (presencaExistente?.origem === OrigemPresenca.MANUAL && presencaExistente.presente) {
+    throw new AppError(409, 'O técnico registrou sua presença neste treino — fale com ele se estiver errado.');
   }
 
   const presenca = await prisma.presenca.upsert({

@@ -44,6 +44,7 @@ export function TreinoResumoCard({ treino, onPress }: Props) {
         {treino.pse ? <Text style={styles.tag}>PSE: {treino.pse.pse}</Text> : null}
         {treino.statusAtleta === 'AUSENTE' ? <Text style={styles.tagAusente}>😔 Ausente</Text> : null}
         {treino.statusAtleta === 'RESPONDIDO' ? <Text style={styles.tagRespondido}>✓ Respondido</Text> : null}
+        {treino.statusAtleta === 'PRESENTE' ? <Text style={styles.tagPresente}>✓ Presente · falta anotar</Text> : null}
       </View>
     </Pressable>
   );
@@ -124,6 +125,13 @@ function criarEstilos(c: Cores) {
       fontSize: 12,
       fontWeight: '700',
       color: c.success,
+    },
+    // Técnico confirmou a presença na chamada, mas o atleta ainda não
+    // lançou tempo nem PSE — o treino continua na lista de pendências dele.
+    tagPresente: {
+      fontSize: 12,
+      fontWeight: '700',
+      color: c.primary,
     },
   });
 }

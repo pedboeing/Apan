@@ -165,3 +165,49 @@ tecnicoRouter.post('/presencas', async (req, res) => {
 
   res.status(201).json({ presenca });
 });
+
+const presencaEmLoteSchema = z.object({
+  treinoId: z.string({ error: 'Treino é obrigatório' }).min(1),
+  presente: z.boolean({ error: 'Informe se os atletas estiveram presentes' }),
+});
+
+// Chamada de uma vez só pro grupo inteiro do treino: o técnico marca todo
+// mundo e depois só corrige quem faltou — numa turma de 20 isso troca 20
+// toques por 2 ou 3. Quem já lançou tempo ou PSE fica de fora: esse atleta
+// já conta como presente por conta própria (origem AUTOMATICA), e
+// sobrescrever apagaria a informação de que ele mesmo registrou o treino.
+tecnicoRouter.post('/presencas/lote', async (req, res) => {
+  const parsed = presencaEmLoteSchema.safeParse(req.body);
+  if (!parsed.success) {
+    throw new AppError(400, parsed.error.issues[0]?.message ?? 'Dados inválidos');
+  }
+  const { treinoId, presente } = parsed.data;
+
+  const treino = await prisma.treino.findUnique({ where: { id: treinoId } });
+  if (!treino) {
+    throw new AppError(404, 'Treino não encontrado');
+  }
+
+  const [atletas, comTempo, comPse] = await Promise.all([
+    prisma.atleta.findMany({ where: { categoria: { in: treino.categorias } }, select: { id: true } }),
+    prisma.registroTempo.findMany({ where: { treinoId }, select: { atletaId: true } }),
+    prisma.registroPSE.findMany({ where: { treinoId }, select: { atletaId: true } }),
+  ]);
+
+  const jaRegistrou = new Set([...comTempo, ...comPse].map((r) => r.atletaId));
+  const alvos = atletas.filter((a) => !jaRegistrou.has(a.id));
+
+  if (alvos.length > 0) {
+    await prisma.$transaction(
+      alvos.map((a) =>
+        prisma.presenca.upsert({
+          where: { atletaId_treinoId: { atletaId: a.id, treinoId } },
+          create: { atletaId: a.id, treinoId, presente, origem: OrigemPresenca.MANUAL },
+          update: { presente, origem: OrigemPresenca.MANUAL },
+        }),
+      ),
+    );
+  }
+
+  res.status(201).json({ marcados: alvos.length, ignorados: atletas.length - alvos.length });
+});
