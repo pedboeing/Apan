@@ -6,7 +6,7 @@ import { Sexo, TipoUsuario } from '../generated/prisma/enums';
 import { Prisma } from '../generated/prisma/client';
 import { calcularCategoria, garantirCategoriaAtualizada } from '../lib/categoria';
 import { AppError } from '../lib/errors';
-import { signToken } from '../lib/jwt';
+import { precisaRenovar, signToken } from '../lib/jwt';
 import { authenticate } from '../middleware/auth';
 import { prisma } from '../prisma';
 
@@ -145,7 +145,18 @@ authRouter.get('/me', authenticate, async (req, res) => {
 
   const atleta = usuario.atleta ? await garantirCategoriaAtualizada(usuario.atleta) : null;
 
-  res.json({ usuario: { ...usuarioPublico(usuario), atleta, tecnico: usuario.tecnico } });
+  // O app chama esta rota toda vez que abre. Aproveitamos pra renovar a
+  // sessão de quem está ativo: passada a metade da validade, devolvemos um
+  // token novo e o app troca o guardado (ver auth-context.tsx). Sem isso,
+  // todo mundo era deslogado de uma vez quando o prazo vencia.
+  const tokenRenovado = precisaRenovar(req.tokenPayload ?? {})
+    ? signToken({ sub: usuario.id, tipo: usuario.tipo })
+    : undefined;
+
+  res.json({
+    usuario: { ...usuarioPublico(usuario), atleta, tecnico: usuario.tecnico },
+    ...(tokenRenovado ? { token: tokenRenovado } : {}),
+  });
 });
 
 const atualizarPerfilBase = {

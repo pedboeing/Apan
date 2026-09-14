@@ -20,6 +20,20 @@ export function signToken(payload: JwtPayload): string {
   return jwt.sign(payload, getSecret(), { expiresIn: expiresIn as jwt.SignOptions['expiresIn'] });
 }
 
-export function verifyToken(token: string): JwtPayload {
-  return jwt.verify(token, getSecret()) as JwtPayload;
+// O que a verificação devolve de fato: o nosso payload mais os campos de
+// tempo padrão do JWT (em segundos), que são o que permite decidir renovação.
+export type JwtPayloadVerificado = JwtPayload & { iat?: number; exp?: number };
+
+export function verifyToken(token: string): JwtPayloadVerificado {
+  return jwt.verify(token, getSecret()) as JwtPayloadVerificado;
+}
+
+// Sessão rolante: passada a metade da validade, vale entregar um token novo
+// em vez de esperar o antigo vencer e obrigar login outra vez. Quem usa o
+// app de vez em quando nunca mais é deslogado; quem some por mais tempo que
+// a validade inteira continua tendo que entrar de novo, que é o correto.
+export function precisaRenovar(payload: { iat?: number; exp?: number }, agora = Date.now()): boolean {
+  if (!payload.iat || !payload.exp) return false;
+  const metadeDaVida = payload.iat + (payload.exp - payload.iat) / 2;
+  return agora / 1000 >= metadeDaVida;
 }

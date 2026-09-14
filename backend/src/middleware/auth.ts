@@ -15,6 +15,7 @@ export function authenticate(req: Request, _res: Response, next: NextFunction) {
   try {
     const payload = verifyToken(token);
     req.usuario = { id: payload.sub, tipo: payload.tipo };
+    req.tokenPayload = { iat: payload.iat, exp: payload.exp };
     next();
   } catch {
     throw new AppError(401, 'Token inválido ou expirado');

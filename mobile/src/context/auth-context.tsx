@@ -1,6 +1,6 @@
 import { createContext, use, useEffect, useState, type PropsWithChildren } from 'react';
 
-import { api } from '@/lib/api';
+import { api, ApiError, definirTratamentoDeSessaoExpirada } from '@/lib/api';
 import { secureStorage } from '@/lib/storage';
 import type { CadastroInput, Usuario } from '@/lib/types';
 
@@ -43,6 +43,16 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
+  // Qualquer 401 vindo de requisição autenticada cai aqui: derruba a
+  // sessão morta e o <Stack.Protected> do layout raiz leva pro login
+  // sozinho, em vez de deixar a pessoa presa numa tela de erro.
+  useEffect(() => {
+    definirTratamentoDeSessaoExpirada(() => {
+      void logout();
+    });
+    return () => definirTratamentoDeSessaoExpirada(null);
+  }, []);
+
   // Sessão persistida: ao abrir o app, restaura token + usuário salvos
   // localmente, sem precisar logar de novo.
   useEffect(() => {
@@ -51,10 +61,50 @@ export function AuthProvider({ children }: PropsWithChildren) {
         secureStorage.getItem(TOKEN_KEY),
         secureStorage.getItem(USUARIO_KEY),
       ]);
-      if (storedToken && storedUsuario) {
-        setToken(storedToken);
-        setUsuario(JSON.parse(storedUsuario) as Usuario);
+
+      if (!storedToken || !storedUsuario) {
+        setIsLoading(false);
+        return;
       }
+
+      // Confere o token com o servidor antes de entrar. Restaurar às cegas
+      // fazia o app abrir "logado" com token vencido e só então quebrar tela
+      // por tela. Aqui a checagem acontece ainda sob a TelaCarregamento:
+      // token válido entra direto, token vencido vai pro login sem erro
+      // nenhum aparecer.
+      try {
+        const { usuario: atual, token: renovado } = await api.me(storedToken);
+        // Sessão rolante: se o backend mandou token novo, ele passa a ser o
+        // válido — é o que evita o logout em massa quando o prazo vence.
+        const tokenEmUso = renovado ?? storedToken;
+        setToken(tokenEmUso);
+        if (renovado) {
+          await secureStorage.setItem(TOKEN_KEY, renovado);
+        }
+        // Guarda só os campos de Usuario: o /auth/me devolve o perfil
+        // inteiro junto, e o SecureStore tem limite de tamanho por chave.
+        const basico: Usuario = {
+          id: atual.id,
+          nome: atual.nome,
+          email: atual.email,
+          tipo: atual.tipo,
+          admin: atual.admin,
+        };
+        setUsuario(basico);
+        await secureStorage.setItem(USUARIO_KEY, JSON.stringify(basico));
+      } catch (erro) {
+        if (erro instanceof ApiError && erro.status === 401) {
+          // Recusa explícita do servidor: sessão acabou mesmo, limpa.
+          await Promise.all([secureStorage.removeItem(TOKEN_KEY), secureStorage.removeItem(USUARIO_KEY)]);
+        } else {
+          // Sem internet ou servidor fora do ar não é sessão inválida —
+          // deslogar aqui puniria quem abriu o app no vestiário sem sinal.
+          // Segue com o que está salvo; a próxima chamada revalida.
+          setToken(storedToken);
+          setUsuario(JSON.parse(storedUsuario) as Usuario);
+        }
+      }
+
       setIsLoading(false);
     })();
   }, []);

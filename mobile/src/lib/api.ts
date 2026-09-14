@@ -47,6 +47,19 @@ export class ApiError extends Error {
   }
 }
 
+// Token recusado pelo backend não é um erro de tela: a sessão morreu, e toda
+// tela seguinte vai falhar igual, prendendo a pessoa numa mensagem que ela
+// não tem como resolver (era o que acontecia — "Token inválido ou expirado"
+// aparecendo em qualquer lugar, sem caminho de saída). Quem trata é o
+// AuthProvider, que limpa a sessão e deixa o roteador levar pro login.
+// Callback em vez de importar o auth-context direto, senão vira ciclo:
+// auth-context já importa este módulo.
+let aoExpirarSessao: (() => void) | null = null;
+
+export function definirTratamentoDeSessaoExpirada(callback: (() => void) | null) {
+  aoExpirarSessao = callback;
+}
+
 const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3333';
 
 // Sem isso, uma requisição que trava (ex: servidor "esfriou" por
@@ -92,6 +105,13 @@ async function request<T>(
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
+    // 401 só conta como sessão expirada quando a requisição realmente levou
+    // um token. Sem essa checagem, login com senha errada — que também
+    // responde 401 — derrubaria a sessão de quem está tentando entrar.
+    if (res.status === 401 && options.token) {
+      aoExpirarSessao?.();
+      throw new ApiError(401, 'Sua sessão expirou. Entre novamente.');
+    }
     throw new ApiError(res.status, typeof data.error === 'string' ? data.error : 'Erro inesperado. Tente novamente.');
   }
 
@@ -102,7 +122,9 @@ export const api = {
   cadastro: (dados: CadastroInput) => request<AuthResponse>('/auth/cadastro', { method: 'POST', body: dados }),
   login: (email: string, senha: string) =>
     request<AuthResponse>('/auth/login', { method: 'POST', body: { email, senha } }),
-  me: (token: string) => request<{ usuario: UsuarioComPerfil }>('/auth/me', { token }),
+  // token vem preenchido quando o backend renovou a sessão (ver
+  // precisaRenovar no backend) — quem chama deve guardar o novo no lugar.
+  me: (token: string) => request<{ usuario: UsuarioComPerfil; token?: string }>('/auth/me', { token }),
   atualizarPerfil: (token: string, dados: AtualizarPerfilInput) =>
     request<{ usuario: UsuarioComPerfil }>('/auth/me', { method: 'PUT', body: dados, token }),
   alterarSenha: (token: string, dados: AlterarSenhaInput) =>
